@@ -1,0 +1,32 @@
+block_detector:
+  model_name: "cmarkea/detr-layout-detection" # Proven layout detection model
+  confidence_threshold: 0.3  # Balanced threshold
+
+table_detector:
+  model_name: "microsoft/table-transformer-detection"
+  confidence_threshold: 0.8  # Very high threshold - only detect obvious tables
+
+# Optimal DPI for text detection accuracy
+render_dpi: 300
+iou_threshold: 0.1  # Very low threshold for precise text merging
+caption_window: 100
+
+# Enhanced text detection settings
+text_detection:
+  prioritize_native_text: true  # Use PDF text as primary source
+  merge_nearby_text: true  # Merge close text blocks
+  text_merge_threshold: 5  # Pixels distance for merging text
+  coordinate_scaling: true  # Scale coordinates properly
+  expand_text_boxes: 3  # Pixels to expand text boxes
+
+# Strict table validation settings
+table_validation:
+  min_area: 50000  # Minimum area for a valid table (pixels)
+  min_aspect_ratio: 0.3  # Minimum width/height ratio
+  max_aspect_ratio: 5.0  # Maximum width/height ratio
+  remove_overlapping: true  # Remove overlapping table detections
+  overlap_threshold: 0.3  # IoU threshold for overlap removal
+  
+# Disable problematic features
+use_ensemble: false
+ocr_enabled: false
