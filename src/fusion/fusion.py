@@ -97,29 +97,62 @@ def determine_text_label(text, blocks):
     # Default to text
     return 'Text'
 
-def validate_table_detection(bbox, score, config=None):
-    """Validate if a detected table is actually a valid table"""
+def validate_table_detection(bbox, score, config=None, pdf_elements=None):
+    """Enhanced validation for table detection with stricter criteria"""
     if not config:
         return True
     
     table_config = config.get('table_validation', {})
     
-    # Calculate area
+    # Calculate dimensions
     width = bbox[2] - bbox[0]
     height = bbox[3] - bbox[1]
     area = width * height
     
-    # Check minimum area
-    min_area = table_config.get('min_area', 50000)
+    # 1. Check minimum area (stricter)
+    min_area = table_config.get('min_area', 75000)  # Increased from 50000
     if area < min_area:
+        print(f"Rejecting table: area {area} < minimum {min_area}")
         return False
     
-    # Check aspect ratio
+    # 2. Check aspect ratio (stricter)
     if height > 0:
         aspect_ratio = width / height
-        min_ratio = table_config.get('min_aspect_ratio', 0.3)
-        max_ratio = table_config.get('max_aspect_ratio', 5.0)
+        min_ratio = table_config.get('min_aspect_ratio', 0.5)  # Increased from 0.4
+        max_ratio = table_config.get('max_aspect_ratio', 3.5)  # Decreased from 4.0
         if aspect_ratio < min_ratio or aspect_ratio > max_ratio:
+            print(f"Rejecting table: aspect ratio {aspect_ratio:.2f} outside range [{min_ratio}, {max_ratio}]")
+            return False
+    
+    # 3. Check minimum confidence score (new)
+    min_confidence = table_config.get('min_confidence', 0.85)  # High confidence required
+    if score < min_confidence:
+        print(f"Rejecting table: confidence {score:.3f} < minimum {min_confidence}")
+        return False
+    
+    # 4. Check minimum dimensions (new)
+    min_width = table_config.get('min_width', 200)
+    min_height = table_config.get('min_height', 100)
+    if width < min_width or height < min_height:
+        print(f"Rejecting table: dimensions {width}x{height} too small (min: {min_width}x{min_height})")
+        return False
+    
+    # 5. Content-based validation (new)
+    if pdf_elements:
+        # Count text elements inside the table bbox
+        text_elements_inside = 0
+        for elem in pdf_elements:
+            if elem.get('type') == 'text':
+                elem_bbox = elem['bbox']
+                # Check if text element is mostly inside table bbox
+                if (elem_bbox[0] >= bbox[0] and elem_bbox[1] >= bbox[1] and 
+                    elem_bbox[2] <= bbox[2] and elem_bbox[3] <= bbox[3]):
+                    text_elements_inside += 1
+        
+        # Require minimum number of text elements for a valid table
+        min_text_elements = table_config.get('min_text_elements', 6)
+        if text_elements_inside < min_text_elements:
+            print(f"Rejecting table: only {text_elements_inside} text elements inside (min: {min_text_elements})")
             return False
     
     return True
@@ -152,9 +185,58 @@ def remove_overlapping_tables(table_detections, config=None):
     
     return filtered_tables
 
+def is_text_inside_container(text_bbox, container_bbox, threshold=0.8):
+    """Check if a text box is mostly contained within another element (table, image, etc.)"""
+    # Calculate intersection area
+    x1 = max(text_bbox[0], container_bbox[0])
+    y1 = max(text_bbox[1], container_bbox[1])
+    x2 = min(text_bbox[2], container_bbox[2])
+    y2 = min(text_bbox[3], container_bbox[3])
+    
+    if x2 <= x1 or y2 <= y1:
+        return False  # No intersection
+    
+    intersection_area = (x2 - x1) * (y2 - y1)
+    text_area = (text_bbox[2] - text_bbox[0]) * (text_bbox[3] - text_bbox[1])
+    
+    if text_area == 0:
+        return False
+    
+    # If most of the text box is inside the container, consider it contained
+    overlap_ratio = intersection_area / text_area
+    return overlap_ratio > threshold
+
+def remove_contained_text_boxes(all_elements):
+    """Remove text boxes that are contained within tables, images, or other elements"""
+    text_elements = []
+    container_elements = []
+    
+    # Separate text elements from container elements (tables, images, etc.)
+    for elem in all_elements:
+        if elem['label'].lower() in ['text', 'title', 'header']:
+            text_elements.append(elem)
+        else:
+            container_elements.append(elem)
+    
+    # Filter out text elements that are contained within containers
+    filtered_text_elements = []
+    for text_elem in text_elements:
+        is_contained = False
+        for container_elem in container_elements:
+            if is_text_inside_container(text_elem['bbox'], container_elem['bbox']):
+                is_contained = True
+                print(f"Removing text '{text_elem.get('text', '')[:30]}...' contained in {container_elem['label']}")
+                break
+        
+        if not is_contained:
+            filtered_text_elements.append(text_elem)
+    
+    # Return filtered text elements + all container elements
+    return filtered_text_elements + container_elements
+
 def merge_boxes(pdf_boxes, vision_boxes, iou_thresh=0.3, config=None):
     """
-    Simplified approach: Prioritize native PDF text with strict table validation
+    Simplified approach: Prioritize native PDF text with basic table validation
     """
     merged = []
     
@@ -200,7 +282,7 @@ def merge_boxes(pdf_boxes, vision_boxes, iou_thresh=0.3, config=None):
                 'source': 'pdf_native'
             })
         
-        # Step 2: Process and validate table detections
+        # Step 2: Process vision detections
         table_detections = []
         other_detections = []
         
@@ -210,14 +292,16 @@ def merge_boxes(pdf_boxes, vision_boxes, iou_thresh=0.3, config=None):
                 continue
             
             if 'table' in v_box['label'].lower():
-                # Validate table detection
-                if validate_table_detection(v_box['bbox'], v_box.get('score', 0), config):
+                # Validate table detection with enhanced criteria
+                if validate_table_detection(v_box['bbox'], v_box.get('score', 0), config, pdf_boxes):
                     table_detections.append({
-                        'label': v_box['label'],
+                        'label': 'Table',
                         'bbox': v_box['bbox'],
                         'score': v_box.get('score', 0.5),
                         'source': 'vision'
                     })
+                else:
+                    print(f"Table detection rejected: bbox={v_box['bbox']}, score={v_box.get('score', 0):.3f}")
             else:
                 # Add other vision detections (images, etc.)
                 other_detections.append({
@@ -230,23 +314,204 @@ def merge_boxes(pdf_boxes, vision_boxes, iou_thresh=0.3, config=None):
         # Remove overlapping table detections
         validated_tables = remove_overlapping_tables(table_detections, config)
         merged.extend(validated_tables)
-        merged.extend(other_detections)
         
-        # Step 3: Add non-text PDF elements
+        # Step 3: Add non-text PDF elements first
+        pdf_images = []
         for p in pdf_boxes:
             if p.get('type') == 'image':
-                merged.append({
+                pdf_images.append({
                     'label': 'Picture',
                     'bbox': p['bbox'],
                     'score': 1.0,
                     'source': 'pdf_native'
                 })
+        
+        # Step 4: Combine all image detections (vision + PDF native) and deduplicate
+        all_image_detections = other_detections + pdf_images
+        filtered_image_detections = remove_overlapping_images_comprehensive(all_image_detections)
+        merged.extend(filtered_image_detections)
+        
+        # Step 5: Remove text boxes contained within tables/images (more aggressive)
+        merged = remove_contained_text_boxes_aggressive(merged)
     
     else:
         # Fallback to original merging approach
         merged = merge_boxes_original(pdf_boxes, vision_boxes, iou_thresh)
     
     return merged
+
+def remove_overlapping_images(image_detections):
+    """Enhanced image deduplication with stricter overlap detection"""
+    if len(image_detections) <= 1:
+        return image_detections
+    
+    # Filter to only image-type detections
+    images = [det for det in image_detections if det['label'].lower() in ['picture', 'image', 'figure']]
+    non_images = [det for det in image_detections if det['label'].lower() not in ['picture', 'image', 'figure']]
+    
+    if len(images) <= 1:
+        return image_detections
+    
+    # Sort by confidence score (highest first)
+    sorted_images = sorted(images, key=lambda x: x.get('score', 0), reverse=True)
+    
+    filtered_images = []
+    for image in sorted_images:
+        # Check if this image overlaps significantly with any already accepted image
+        overlaps = False
+        for accepted_image in filtered_images:
+            overlap_iou = iou(image['bbox'], accepted_image['bbox'])
+            
+            # More aggressive deduplication with multiple criteria
+            if overlap_iou > 0.3:  # Lowered from 0.5 to 0.3 for better deduplication
+                overlaps = True
+                print(f"Removing overlapping image detection (IoU: {overlap_iou:.3f} > 0.3)")
+                break
+            
+            # Additional check: if images are very close in position (even with low IoU)
+            img_center_x = (image['bbox'][0] + image['bbox'][2]) / 2
+            img_center_y = (image['bbox'][1] + image['bbox'][3]) / 2
+            acc_center_x = (accepted_image['bbox'][0] + accepted_image['bbox'][2]) / 2
+            acc_center_y = (accepted_image['bbox'][1] + accepted_image['bbox'][3]) / 2
+            
+            distance = ((img_center_x - acc_center_x) ** 2 + (img_center_y - acc_center_y) ** 2) ** 0.5
+            
+            # If centers are very close (within 50 pixels), consider it a duplicate
+            if distance < 50:
+                overlaps = True
+                print(f"Removing nearby image detection (distance: {distance:.1f} < 50 pixels)")
+                break
+        
+        if not overlaps:
+            filtered_images.append(image)
+    
+    return filtered_images + non_images
+
+def remove_overlapping_images_comprehensive(all_detections):
+    """Comprehensive image deduplication across vision and PDF native detections"""
+    if len(all_detections) <= 1:
+        return all_detections
+    
+    # Filter to only image-type detections
+    images = [det for det in all_detections if det['label'].lower() in ['picture', 'image', 'figure']]
+    non_images = [det for det in all_detections if det['label'].lower() not in ['picture', 'image', 'figure']]
+    
+    if len(images) <= 1:
+        return all_detections
+    
+    # Sort by priority: PDF native first (score 1.0), then by confidence score
+    def sort_priority(det):
+        if det.get('source') == 'pdf_native':
+            return (1, det.get('score', 0))  # PDF native gets highest priority
+        else:
+            return (0, det.get('score', 0))  # Vision detections get lower priority
+    
+    sorted_images = sorted(images, key=sort_priority, reverse=True)
+    
+    filtered_images = []
+    for image in sorted_images:
+        # Check if this image overlaps significantly with any already accepted image
+        overlaps = False
+        for accepted_image in filtered_images:
+            overlap_iou = iou(image['bbox'], accepted_image['bbox'])
+            
+            # Very aggressive deduplication for comprehensive removal
+            if overlap_iou > 0.2:  # Even lower threshold for comprehensive deduplication
+                overlaps = True
+                print(f"Removing overlapping image detection (IoU: {overlap_iou:.3f} > 0.2, source: {image.get('source', 'unknown')})")
+                break
+            
+            # Additional check: if images are very close in position
+            img_center_x = (image['bbox'][0] + image['bbox'][2]) / 2
+            img_center_y = (image['bbox'][1] + image['bbox'][3]) / 2
+            acc_center_x = (accepted_image['bbox'][0] + accepted_image['bbox'][2]) / 2
+            acc_center_y = (accepted_image['bbox'][1] + accepted_image['bbox'][3]) / 2
+            
+            distance = ((img_center_x - acc_center_x) ** 2 + (img_center_y - acc_center_y) ** 2) ** 0.5
+            
+            # If centers are very close (within 75 pixels), consider it a duplicate
+            if distance < 75:
+                overlaps = True
+                print(f"Removing nearby image detection (distance: {distance:.1f} < 75 pixels, source: {image.get('source', 'unknown')})")
+                break
+            
+            # Additional check: if bounding boxes have significant overlap in any dimension
+            x_overlap = min(image['bbox'][2], accepted_image['bbox'][2]) - max(image['bbox'][0], accepted_image['bbox'][0])
+            y_overlap = min(image['bbox'][3], accepted_image['bbox'][3]) - max(image['bbox'][1], accepted_image['bbox'][1])
+            
+            if x_overlap > 0 and y_overlap > 0:
+                # Calculate overlap percentage relative to smaller box
+                img_area = (image['bbox'][2] - image['bbox'][0]) * (image['bbox'][3] - image['bbox'][1])
+                acc_area = (accepted_image['bbox'][2] - accepted_image['bbox'][0]) * (accepted_image['bbox'][3] - accepted_image['bbox'][1])
+                overlap_area = x_overlap * y_overlap
+                
+                smaller_area = min(img_area, acc_area)
+                if smaller_area > 0 and (overlap_area / smaller_area) > 0.3:
+                    overlaps = True
+                    print(f"Removing overlapping image detection (area overlap: {overlap_area/smaller_area:.3f} > 0.3, source: {image.get('source', 'unknown')})")
+                    break
+        
+        if not overlaps:
+            filtered_images.append(image)
+    
+    return filtered_images + non_images
+
+def remove_contained_text_boxes_aggressive(all_elements):
+    """Aggressively remove text boxes that are contained within tables, images, or other elements"""
+    text_elements = []
+    container_elements = []
+    
+    # Separate text elements from container elements (tables, images, etc.)
+    for elem in all_elements:
+        if elem['label'].lower() in ['text', 'title', 'header']:
+            text_elements.append(elem)
+        else:
+            container_elements.append(elem)
+    
+    # Remove text that overlaps significantly with containers
+    filtered_text_elements = []
+    for text_elem in text_elements:
+        is_contained = False
+        for container_elem in container_elements:
+            # Use very low threshold for ultra aggressive removal - any overlap removes the text
+            if is_text_inside_container(text_elem['bbox'], container_elem['bbox'], threshold=0.1):  # 10% overlap
+                is_contained = True
+                print(f"Removing text '{text_elem.get('text', '')[:30]}...' contained in {container_elem['label']}")
+                break
+        
+        if not is_contained:
+            filtered_text_elements.append(text_elem)
+    
+    # Return filtered text elements + all container elements
+    return filtered_text_elements + container_elements
+
+def remove_contained_text_boxes_simple(all_elements):
+    """Simplified version - only remove text clearly inside tables"""
+    text_elements = []
+    container_elements = []
+    
+    # Separate text elements from container elements (tables, images, etc.)
+    for elem in all_elements:
+        if elem['label'].lower() in ['text', 'title', 'header']:
+            text_elements.append(elem)
+        else:
+            container_elements.append(elem)
+    
+    # Only remove text that is very clearly inside containers
+    filtered_text_elements = []
+    for text_elem in text_elements:
+        is_contained = False
+        for container_elem in container_elements:
+            if is_text_inside_container(text_elem['bbox'], container_elem['bbox'], threshold=0.9):  # Higher threshold
+                is_contained = True
+                print(f"Removing text '{text_elem.get('text', '')[:30]}...' contained in {container_elem['label']}")
+                break
+        
+        if not is_contained:
+            filtered_text_elements.append(text_elem)
+    
+    # Return filtered text elements + all container elements
+    return filtered_text_elements + container_elements
 
 
 

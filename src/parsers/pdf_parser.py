@@ -73,7 +73,7 @@ def extract_text_with_pymupdf(pdf_path, page_num, dpi=300):
 
 
 def parse_pdf_native(pdf_path, page_num, dpi=300):
-    """Simplified PDF parsing focusing on accurate text extraction"""
+    """Enhanced PDF parsing with structural analysis for better table detection"""
     elements = []
     
     # Use PyMuPDF for text extraction with proper coordinate scaling
@@ -112,8 +112,41 @@ def parse_pdf_native(pdf_path, page_num, dpi=300):
                         })
             except Exception as e:
                 print(f"Error processing image xref {xref}: {e}")
+        
+        # Extract drawing elements (lines, rectangles) for table structure detection
+        try:
+            drawings = page.get_drawings()
+            line_elements = []
+            
+            for drawing in drawings:
+                for item in drawing["items"]:
+                    if item[0] == "l":  # Line
+                        # item format: ("l", point1, point2)
+                        p1, p2 = item[1], item[2]
+                        
+                        # Scale coordinates
+                        scaled_line = [
+                            p1.x * scale_factor, p1.y * scale_factor,
+                            p2.x * scale_factor, p2.y * scale_factor
+                        ]
+                        
+                        # Determine if horizontal or vertical line
+                        is_horizontal = abs(p1.y - p2.y) < abs(p1.x - p2.x)
+                        
+                        line_elements.append({
+                            'type': 'line',
+                            'bbox': tuple(scaled_line),
+                            'orientation': 'horizontal' if is_horizontal else 'vertical',
+                            'length': ((p2.x - p1.x)**2 + (p2.y - p1.y)**2)**0.5 * scale_factor
+                        })
+            
+            elements.extend(line_elements)
+            print(f"Extracted {len(line_elements)} line elements from PDF")
+            
+        except Exception as e:
+            print(f"Error extracting drawing elements: {e}")
                 
     except Exception as e:
-        print(f"Error in image extraction: {e}")
+        print(f"Error in image/structure extraction: {e}")
     
     return elements

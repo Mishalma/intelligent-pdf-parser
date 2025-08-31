@@ -1,15 +1,22 @@
 block_detector:
   model_name: "cmarkea/detr-layout-detection" # Proven layout detection model
-  confidence_threshold: 0.3  # Balanced threshold
+  confidence_threshold: 0.3  # Balanced threshold for good precision/recall
 
 table_detector:
   model_name: "microsoft/table-transformer-detection"
-  confidence_threshold: 0.8  # Very high threshold - only detect obvious tables
+  confidence_threshold: 0.8  # Even higher threshold to reduce false positives
 
 # Optimal DPI for text detection accuracy
 render_dpi: 300
 iou_threshold: 0.1  # Very low threshold for precise text merging
 caption_window: 100
+
+# Multi-model ensemble for better accuracy (disabled for now)
+ensemble_detection:
+  enabled: false
+  models:
+    - "cmarkea/detr-layout-detection"
+  voting_threshold: 0.3
 
 # Enhanced text detection settings
 text_detection:
@@ -19,13 +26,19 @@ text_detection:
   coordinate_scaling: true  # Scale coordinates properly
   expand_text_boxes: 3  # Pixels to expand text boxes
 
-# Strict table validation settings
+# Ultra-strict table validation settings
 table_validation:
-  min_area: 50000  # Minimum area for a valid table (pixels)
-  min_aspect_ratio: 0.3  # Minimum width/height ratio
-  max_aspect_ratio: 5.0  # Maximum width/height ratio
+  min_area: 75000  # Even higher minimum area to avoid false positives
+  min_aspect_ratio: 0.5  # More restrictive aspect ratio
+  max_aspect_ratio: 3.5  # More restrictive maximum aspect ratio
+  min_confidence: 0.85  # High confidence threshold
+  min_width: 200  # Minimum width in pixels
+  min_height: 100  # Minimum height in pixels
+  min_text_elements: 6  # Minimum text elements inside table
   remove_overlapping: true  # Remove overlapping table detections
-  overlap_threshold: 0.3  # IoU threshold for overlap removal
+  overlap_threshold: 0.3  # Standard IoU threshold
+  structure_analysis: false  # Disable for now to avoid over-detection
+  line_detection: false  # Disable for now
   
 # Disable problematic features
 use_ensemble: false
